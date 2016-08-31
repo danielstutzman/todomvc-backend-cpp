@@ -1,31 +1,43 @@
+#include <libpq-fe.h>
 #include <microhttpd.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include "./vendor/json/libjson/libjson.h"
 
-char* create_json_for_todos_route() {
-  JSONNODE *n = json_new(JSON_NODE);
-  json_push_back(n, json_new_a("String Node", "String Value"));
-  json_push_back(n, json_new_i("Integer Node", 42));
-  json_push_back(n, json_new_f("Floating Point Node", 3.14));
-  json_push_back(n, json_new_b("Boolean Node", 1));
+// Returns a JSON string that needs to be freed later
+char* create_json_for_todos_route(PGconn* conn) {
+  const char* sql = "SELECT * FROM todo_items ORDER BY id";
+  PGresult* result = PQexec(conn, sql);
+  if (PQresultStatus(result) != PGRES_TUPLES_OK) {
+    char buffer[100];
+    snprintf(buffer, 100, "SQL %s failed: %s", sql, PQerrorMessage(conn));
+    PQclear(result);
+    return strdup(buffer);
+  }
 
-  JSONNODE *c = json_new(JSON_ARRAY);
-  json_set_name(c, "ArrayOfNumbers");
-  json_push_back(c, json_new_i(NULL, 16));
-  json_push_back(c, json_new_i(NULL, 42));
-  json_push_back(c, json_new_i(NULL, 128));
-  json_push_back(n, c);
+  JSONNODE* todos_json = json_new(JSON_ARRAY);
+  for (int rowNum = 0; rowNum < PQntuples(result); rowNum++) {
+    int id        =   atoi(PQgetvalue(result, rowNum, 0));
+    char* title   =        PQgetvalue(result, rowNum, 1);
+    int completed = strcmp(PQgetvalue(result, rowNum, 2), "t") == 0;
 
-  json_char *jc = json_write_formatted(n);
+    JSONNODE* todo_json = json_new(JSON_NODE);
+    json_push_back(todo_json, json_new_i("id", id));
+    json_push_back(todo_json, json_new_a("title", title));
+    json_push_back(todo_json, json_new_b("completed", completed));
+    json_push_back(todos_json, todo_json);
+  }
+  PQclear(result);
+
+  json_char *jc = json_write_formatted(todos_json);
   char* json_string = strdup(jc);
   json_free(jc);
-  json_delete(n);
+  json_delete(todos_json);
   return json_string;
 }
 
-static int access_handler_callback(void* _contextInput,
+static int access_handler_callback(void* contextInput,
     struct MHD_Connection* connection, const char* url, const char* method,
     const char* version, const char* upload_data, size_t* upload_data_size,
     void** contextOutput) {
@@ -57,7 +69,8 @@ static int access_handler_callback(void* _contextInput,
       response_memory_mode = MHD_RESPMEM_MUST_COPY;
       status_code = MHD_HTTP_OK;
     } else if (strcmp(url, "/todos") == 0) {
-      output = create_json_for_todos_route();
+      PGconn* conn = (PGconn*) contextInput;
+      output = create_json_for_todos_route(conn);
       response_memory_mode = MHD_RESPMEM_MUST_FREE;
       status_code = MHD_HTTP_NOT_FOUND;
     } else {
@@ -77,17 +90,23 @@ static int access_handler_callback(void* _contextInput,
 int main(int argc, char ** argv) {
   if (argc != 2) {
     printf("%s PORT\n", argv[0]);
-    return 1;
+    exit(1);
   }
   int port = atoi(argv[1]);
 
+  PGconn* conn = PQconnectdb("host=localhost dbname=todomvc");
+  if (PQstatus(conn) != CONNECTION_OK) {
+    fprintf(stderr, "Connection to database failed: %s", PQerrorMessage(conn));
+    PQfinish(conn);
+    exit(1);
+  }
+
   fprintf(stderr, "Running web server on port %d...\n", port);
   struct MHD_Daemon* d = MHD_start_daemon(MHD_USE_THREAD_PER_CONNECTION,
-    port, NULL, NULL, &access_handler_callback, NULL, MHD_OPTION_END);
+    port, NULL, NULL, &access_handler_callback, conn, MHD_OPTION_END);
   if (d == NULL) {
     fprintf(stderr, "Fatal error: MHD_start_daemon returned NULL\n");
     return 1;
   }
   pause(); /* never return; run web server until Ctrl-C pressed */
-  return 0;
 }

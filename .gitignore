@@ -1,5 +1,3 @@
 /vendor/httpd/libmicrohttpd-0.9.51
 /vendor/json/libjson
-/testlibpq
-/testjson
 /testhttpd
